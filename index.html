@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Editeur de Cotes Libres</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100 m-0 p-0 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect, useLayoutEffect } = React;
+
+        function App() {
+          const [image, setImage] = useState(null);
+          const [arrows, setArrows] = useState([]);
+          const [mode, setMode] = useState('draw');
+          const [selectedArrowId, setSelectedArrowId] = useState(null);
+          const [editAction, setEditAction] = useState('move');
+          const [scale, setScale] = useState(1);
+          const scaleRef = useRef(1);
+          const [dragState, setDragState] = useState(null);
+          
+          const containerRef = useRef(null);
+          const contentRef = useRef(null);
+          const pinchRef = useRef(null);
+          const targetScrollRef = useRef(null);
+          
+          const modeRef = useRef(mode);
+          const dragStateRef = useRef(dragState);
+          
+          useEffect(() => { modeRef.current = mode; }, [mode]);
+          useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
+
+          const updateScale = (newScale) => {
+            setScale(newScale);
+            scaleRef.current = newScale;
+          };
+
+          useLayoutEffect(() => {
+            if (targetScrollRef.current && containerRef.current) {
+              containerRef.current.scrollLeft = targetScrollRef.current.left;
+              containerRef.current.scrollTop = targetScrollRef.current.top;
+              targetScrollRef.current = null;
+            }
+          }, [scale]);
+
+          useEffect(() => {
+            const container = containerRef.current;
+            if (!container) return;
+
+            const handleTouchStart = (e) => {
+              if (e.touches.length >= 2) setDragState(null);
+              if (e.touches.length === 2 && contentRef.current) {
+                const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                const containerRect = container.getBoundingClientRect();
+                const contentRect = contentRef.current.getBoundingClientRect();
+                const ix = (cx - containerRect.left - (contentRect.left - containerRect.left)) / scaleRef.current;
+                const iy = (cy - containerRect.top - (contentRect.top - containerRect.top)) / scaleRef.current;
+                pinchRef.current = { dist, initialScale: scaleRef.current, cx, cy, ix, iy };
+              }
+            };
+
+            const handleTouchMove = (e) => {
+              if (e.touches.length >= 2 && dragStateRef.current?.type === 'draw') setDragState(null);
+              if (e.touches.length === 2 && contentRef.current) {
+                e.preventDefault();
+                if (pinchRef.current) {
+                  const currentCx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                  const currentCy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                  const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                  const ratio = dist / pinchRef.current.dist;
+                  const newScale = Math.min(Math.max(pinchRef.current.initialScale * ratio, 0.25), 5);
+                  const containerRect = container.getBoundingClientRect();
+                  const contentRect = contentRef.current.getBoundingClientRect();
+                  const baseOffsetX = contentRect.left - containerRect.left + container.scrollLeft;
+                  const baseOffsetY = contentRect.top - containerRect.top + container.scrollTop;
+                  targetScrollRef.current = { left: (pinchRef.current.ix * newScale) - (currentCx - containerRect.left) + baseOffsetX, top: (pinchRef.current.iy * newScale) - (currentCy - containerRect.top) + baseOffsetY };
+                  updateScale(newScale);
+                }
+              } else if (dragStateRef.current || modeRef.current === 'draw') {
+                e.preventDefault();
+              }
+            };
+
+            const handleWheel = (e) => {
+              if ((e.ctrlKey || e.metaKey) && contentRef.current) {
+                e.preventDefault();
+                const oldScale = scaleRef.current;
+                const newScale = Math.min(Math.max(oldScale * Math.pow(0.99, e.deltaY / 10), 0.25), 5);
+                if (oldScale === newScale) return;
+                const containerRect = container.getBoundingClientRect();
+                const contentRect = contentRef.current.getBoundingClientRect();
+                const ix = (e.clientX - contentRect.left) / oldScale;
+                const iy = (e.clientY - contentRect.top) / oldScale;
+                const baseOffsetX = contentRect.left - containerRect.left + container.scrollLeft;
+                const baseOffsetY = contentRect.top - containerRect.top + container.scrollTop;
+                targetScrollRef.current = { left: (ix * newScale) - (e.clientX - containerRect.left) + baseOffsetX, top: (iy * newScale) - (e.clientY - containerRect.top) + baseOffsetY };
+                updateScale(newScale);
+              }
+            };
+
+            container.addEventListener('touchstart', handleTouchStart, { passive: false });
+            container.addEventListener('touchmove', handleTouchMove, { passive: false });
+            container.addEventListener('wheel', handleWheel, { passive: false });
+            return () => {
+              container.removeEventListener('touchstart', handleTouchStart);
+              container.removeEventListener('touchmove', handleTouchMove);
+              container.removeEventListener('wheel', handleWheel);
+            };
+          }, []);
+
+          const handleImageUpload = (e) => {
+            const file = e.target.files[0];
+            if (file) {
+              setImage(URL.createObjectURL(file));
+              setArrows([]);
+              setSelectedArrowId(null);
+              updateScale(1);
+            }
+          };
+
+          const zoomToCenter = (delta) => {
+            const container = containerRef.current;
+            const content = contentRef.current;
+            if (!container || !content) return;
+            const oldScale = scaleRef.current;
+            const newScale = Math.min(Math.max(oldScale + delta, 0.25), 5);
+            if (oldScale === newScale) return;
+            const containerRect = container.getBoundingClientRect();
+            const contentRect = content.getBoundingClientRect();
+            const cx = containerRect.left + containerRect.width / 2;
+            const cy = containerRect.top + containerRect.height / 2;
+            const ix = (cx - contentRect.left) / oldScale;
+            const iy = (cy - contentRect.top) / oldScale;
+            const baseOffsetX = contentRect.left - containerRect.left + container.scrollLeft;
+            const baseOffsetY = contentRect.top - containerRect.top + container.scrollTop;
+            targetScrollRef.current = { left: (ix * newScale) - (cx - containerRect.left) + baseOffsetX, top: (iy * newScale) - (cy - containerRect.top) + baseOffsetY };
+            updateScale(newScale);
+          };
+
+          const getPointerCoords = (clientX, clientY) => {
+            const rect = contentRef.current.getBoundingClientRect();
+            return { x: (clientX - rect.left) / scaleRef.current, y: (clientY - rect.top) / scaleRef.current };
+          };
+
+          const onPointerDown = (e) => {
+            if (!image || mode === 'preview' || (e.pointerType === 'touch' && e.isPrimary === false)) return;
+            const coords = getPointerCoords(e.clientX, e.clientY);
+            if (mode === 'draw') {
+              setDragState({ type: 'draw', startX: coords.x, startY: coords.y, currentX: coords.x, currentY: coords.y });
+              setSelectedArrowId(null);
+            } else if (mode === 'select') {
+              setSelectedArrowId(null);
+            }
+          };
+
+          const onPointerMove = (e) => {
+            if (!dragState) return;
+            const coords = getPointerCoords(e.clientX, e.clientY);
+            if (dragState.type === 'draw') {
+              setDragState({ ...dragState, currentX: coords.x, currentY: coords.y });
+            } else if (dragState.type === 'move_start') {
+              setArrows(arrows.map(a => a.id === dragState.id ? { ...a, x1: coords.x, y1: coords.y } : a));
+            } else if (dragState.type === 'move_end') {
+              setArrows(arrows.map(a => a.id === dragState.id ? { ...a, x2: coords.x, y2: coords.y } : a));
+            } else if (dragState.type === 'move_body') {
+              const dx = coords.x - dragState.lastX;
+              const dy = coords.y - dragState.lastY;
+              setArrows(arrows.map(a => a.id === dragState.id ? { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy } : a));
+              setDragState({ ...dragState, lastX: coords.x, lastY: coords.y });
+            } else if (dragState.type === 'rotate') {
+              const currentAngle = Math.atan2(coords.y - dragState.cy, coords.x - dragState.cx);
+              const deltaAngle = currentAngle - dragState.lastAngle;
+              const cos = Math.cos(deltaAngle);
+              const sin = Math.sin(deltaAngle);
+              setArrows(arrows.map(a => {
+                if (a.id === dragState.id) {
+                  return {
+                    ...a,
+                    x1: dragState.cx + (a.x1 - dragState.cx) * cos - (a.y1 - dragState.cy) * sin,
+                    y1: dragState.cy + (a.x1 - dragState.cx) * sin + (a.y1 - dragState.cy) * cos,
+                    x2: dragState.cx + (a.x2 - dragState.cx) * cos - (a.y2 - dragState.cy) * sin,
+                    y2: dragState.cy + (a.x2 - dragState.cx) * sin + (a.y2 - dragState.cy) * cos
+                  };
+                }
+                return a;
+              }));
+              setDragState({ ...dragState, lastAngle: currentAngle });
+            }
+          };
+
+          const onPointerUp = () => {
+            if (!dragState) return;
+            if (dragState.type === 'draw') {
+              const dist = Math.hypot(dragState.currentX - dragState.startX, dragState.currentY - dragState.startY);
+              if (dist > 3) {
+                const newId = Date.now();
+                setArrows([...arrows, { id: newId, x1: dragState.startX, y1: dragState.startY, x2: dragState.currentX, y2: dragState.currentY, label: 'X', size: 1, textSize: 1 }]);
+                setSelectedArrowId(newId);
+                setMode('select');
+                setEditAction('move');
+              }
+            }
+            setDragState(null);
+          };
+
+          const startArrowDrag = (e, id, type) => {
+            if (mode === 'draw') return;
+            e.stopPropagation();
+            setSelectedArrowId(id);
+            const coords = getPointerCoords(e.clientX, e.clientY);
+            if (type === 'rotate') {
+              const arr = arrows.find(a => a.id === id);
+              const cx = (arr.x1 + arr.x2) / 2;
+              const cy = (arr.y1 + arr.y2) / 2;
+              setDragState({ type, id, lastAngle: Math.atan2(coords.y - cy, coords.x - cx), cx, cy });
+            } else {
+              setDragState({ type, id, lastX: coords.x, lastY: coords.y });
+            }
+          };
+
+          const deleteSelectedArrow = () => {
+            if (selectedArrowId) {
+              setArrows(arrows.filter(a => a.id !== selectedArrowId));
+              setSelectedArrowId(null);
+            }
+          };
+
+          const snapHorizontal = () => {
+            if (!selectedArrowId) return;
+            setArrows(arrows.map(a => {
+              if (a.id !== selectedArrowId) return a;
+              const cx = (a.x1 + a.x2) / 2;
+              const cy = (a.y1 + a.y2) / 2;
+              const len = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
+              return { ...a, x1: cx - len / 2, y1: cy, x2: cx + len / 2, y2: cy };
+            }));
+          };
+
+          const snapVertical = () => {
+            if (!selectedArrowId) return;
+            setArrows(arrows.map(a => {
+              if (a.id !== selectedArrowId) return a;
+              const cx = (a.x1 + a.x2) / 2;
+              const cy = (a.y1 + a.y2) / 2;
+              const len = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
+              return { ...a, x1: cx, y1: cy - len / 2, x2: cx, y2: cy + len / 2 };
+            }));
+          };
+
+          const activeArrow = arrows.find(a => a.id === selectedArrowId);
+
+          return (
+            <div className="min-h-screen bg-slate-100 flex flex-col font-sans select-none overflow-hidden">
+              {/* BARRE D'OUTILS PRINCIPALE */}
+              <div className="bg-white shadow-sm border-b border-slate-200 p-3 flex flex-wrap gap-4 items-center justify-between z-20 relative">
+                <label className="flex items-center gap-2 px-3 py-2 bg-slate-800 text-white rounded cursor-pointer hover:bg-slate-700 transition shadow-sm text-sm font-medium">
+                  <span>📁</span>
+                  <span className="hidden sm:inline">{image ? 'Changer Image' : 'Importer image'}</span>
+                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                </label>
+
+                {image && (
+                  <div className="flex bg-slate-100 p-1 rounded border border-slate-200 shadow-inner">
+                    <button onClick={() => { setMode('draw'); setSelectedArrowId(null); }} className={`flex items-center gap-2 px-4 py-2 rounded transition-all font-bold text-sm ${mode === 'draw' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>
+                      ✏️ Tracer
+                    </button>
+                    <button onClick={() => setMode('select')} className={`flex items-center gap-2 px-4 py-2 rounded transition-all font-bold text-sm ${mode === 'select' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>
+                      ✋ Sélectionner / Déplacer
+                    </button>
+                  </div>
+                )}
+
+                {image && (
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center bg-slate-100 rounded border border-slate-200 shadow-inner text-slate-600 text-xs font-bold gap-1">
+                      <button onClick={() => zoomToCenter(-0.25)} className="p-2 hover:bg-slate-200 rounded-l">➖</button>
+                      <span className="w-10 text-center">{Math.round(scale * 100)}%</span>
+                      <button onClick={() => zoomToCenter(0.25)} className="p-2 hover:bg-slate-200 rounded-r">➕</button>
+                    </div>
+                    <button onClick={() => { setSelectedArrowId(null); setMode('preview'); }} className={`flex items-center gap-2 px-3 py-2 rounded text-sm font-bold transition shadow-sm ${mode === 'preview' ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'}`}>
+                      📷 Rendu Final
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* PANNEAU SECONDAIRE TOUJOURS AFFICHÉ (HAUTEUR FIXE) */}
+              {image && (
+                <div className="bg-slate-800 text-white p-2.5 flex flex-wrap justify-center items-center gap-3 z-30 relative shadow-lg min-h-[52px]">
+                  <span className="text-slate-300 text-sm font-medium mr-1">Action :</span>
+                  <button onClick={() => setEditAction('move')} className={`px-2.5 py-1.5 rounded text-xs font-medium transition ${editAction === 'move' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>
+                    ✋ Déplacer
+                  </button>
+                  <button onClick={() => setEditAction('resize')} className={`px-2.5 py-1.5 rounded text-xs font-medium transition ${editAction === 'resize' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>
+                    📏 Taille flèche
+                  </button>
+                  <button onClick={() => setEditAction('rotate')} className={`px-2.5 py-1.5 rounded text-xs font-medium transition ${editAction === 'rotate' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>
+                    🔄 Pivoter
+                  </button>
+                  <div className="w-px h-5 bg-slate-600 mx-1"></div>
+                  <div className="flex items-center gap-1.5 bg-slate-700 px-2 py-1 rounded" title={selectedArrowId ? "Modifier la taille de la flèche sélectionnée" : "Sélectionnez d'abord une flèche"}>
+                    <span className="text-slate-300 text-xs">Flèche :</span>
+                    <input type="range" min="0.2" max="3" step="0.1" value={activeArrow?.size ?? 1} onChange={(e) => selectedArrowId && setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, size: parseFloat(e.target.value) } : a))} className="w-16 accent-orange-500 cursor-pointer" />
+                  </div>
+                  <div className="flex items-center gap-1.5 bg-slate-700 px-2 py-1 rounded" title={selectedArrowId ? "Modifier la taille du texte sélectionné" : "Sélectionnez d'abord une flèche"}>
+                    <span className="text-slate-300 text-xs">🔤 Texte :</span>
+                    <input type="range" min="0.5" max="3" step="0.1" value={activeArrow?.textSize ?? 1} onChange={(e) => selectedArrowId && setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, textSize: parseFloat(e.target.value) } : a))} className="w-16 accent-orange-500 cursor-pointer" />
+                  </div>
+                  <div className="w-px h-5 bg-slate-600 mx-1"></div>
+                  <button onClick={snapHorizontal} className="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium">Horiz.</button>
+                  <button onClick={snapVertical} className="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium">Vertic.</button>
+                  <div className="w-px h-5 bg-slate-600 mx-1"></div>
+                  <button onClick={deleteSelectedArrow} disabled={!selectedArrowId} className={`px-3 py-1.5 rounded text-xs font-bold transition shadow ${selectedArrowId ? 'bg-red-600 hover:bg-red-700 text-white cursor-pointer' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}>
+                    🗑️ Supprimer
+                  </button>
+                </div>
+              )}
+
+              <div ref={containerRef} className="flex-1 overflow-auto bg-slate-200 p-4">
+                {!image ? (
+                  <div className="mt-20 flex flex-col items-center opacity-50">
+                    <p className="text-xl mb-2">📁</p>
+                    <p>Veuillez importer une image.</p>
+                  </div>
+                ) : (
+                  <div className="inline-block relative">
+                    <div ref={contentRef} style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }} className={`relative shadow-2xl bg-white border-2 border-transparent ${mode === 'draw' ? 'cursor-crosshair' : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp}>
+                      <img src={image} alt="Support" className="max-w-[95vw] md:max-w-[80vw] object-contain pointer-events-none block" draggable={false} />
+                      
+                      <svg width="0" height="0" className="absolute">
+                        <defs>
+                          <marker id="arrow-start" orient="auto" markerWidth="5" markerHeight="5" refX="0.5" refY="2.5"><path d="M 5 0 L 0 2.5 L 5 5 Z" fill="#0284c7" /></marker>
+                          <marker id="arrow-end" orient="auto" markerWidth="5" markerHeight="5" refX="4.5" refY="2.5"><path d="M 0 0 L 5 2.5 L 0 5 Z" fill="#0284c7" /></marker>
+                          <marker id="arrow-start-selected" orient="auto" markerWidth="5" markerHeight="5" refX="0.5" refY="2.5"><path d="M 5 0 L 0 2.5 L 5 5 Z" fill="#ea580c" /></marker>
+                          <marker id="arrow-end-selected" orient="auto" markerWidth="5" markerHeight="5" refX="4.5" refY="2.5"><path d="M 0 0 L 5 2.5 L 0 5 Z" fill="#ea580c" /></marker>
+                        </defs>
+                      </svg>
+
+                      <svg className={`absolute top-0 left-0 w-full h-full overflow-visible ${mode === 'draw' ? 'pointer-events-none' : ''}`}>
+                        {arrows.map(arr => {
+                          const isSelected = arr.id === selectedArrowId;
+                          const isEditingThis = isSelected && mode === 'select';
+                          const color = isSelected && mode !== 'preview' ? "#ea580c" : "#0284c7";
+                          const markerPrefix = isSelected && mode !== 'preview' ? "-selected" : "";
+                          return (
+                            <g key={`line-${arr.id}`}>
+                              <line x1={arr.x1} y1={arr.y1} x2={arr.x2} y2={arr.y2} stroke="transparent" strokeWidth="25" className="pointer-events-auto cursor-pointer" onPointerDown={(e) => {
+                                if (mode === 'preview') return;
+                                e.stopPropagation();
+                                if (arr.id !== selectedArrowId) {
+                                  setSelectedArrowId(arr.id);
+                                  setEditAction('move');
+                                } else if (editAction === 'move') {
+                                  startArrowDrag(e, arr.id, 'move_body');
+                                } else if (editAction === 'rotate') {
+                                  startArrowDrag(e, arr.id, 'rotate');
+                                }
+                              }} />
+                              <line x1={arr.x1} y1={arr.y1} x2={arr.x2} y2={arr.y2} stroke={color} strokeWidth={(isSelected && mode !== 'preview' ? 1.5 : 1) * (arr.size || 1)} markerStart={`url(#arrow-start${markerPrefix})`} markerEnd={`url(#arrow-end${markerPrefix})`} />
+                              {isEditingThis && editAction === 'resize' && (
+                                <>
+                                  <circle cx={arr.x1} cy={arr.y1} r="6" fill="white" stroke="#ea580c" strokeWidth="2" className="pointer-events-auto cursor-crosshair" onPointerDown={(e) => startArrowDrag(e, arr.id, 'move_start')} />
+                                  <circle cx={arr.x2} cy={arr.y2} r="6" fill="white" stroke="#ea580c" strokeWidth="2" className="pointer-events-auto cursor-crosshair" onPointerDown={(e) => startArrowDrag(e, arr.id, 'move_end')} />
+                                </>
+                              )}
+                            </g>
+                          );
+                        })}
+                        {dragState && dragState.type === 'draw' && (
+                          <line x1={dragState.startX} y1={dragState.startY} x2={dragState.currentX} y2={dragState.currentY} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4" markerStart="url(#arrow-start)" markerEnd="url(#arrow-end)" />
+                        )}
+                      </svg>
+
+                      {arrows.map(arr => {
+                        const isSelected = arr.id === selectedArrowId;
+                        const isEditingThis = isSelected && mode === 'select';
+                        const midX = (arr.x1 + arr.x2) / 2;
+                        const midY = (arr.y1 + arr.y2) / 2;
+                        return (
+                          <div key={`text-${arr.id}`} className="absolute z-20 flex items-center justify-center group" style={{ left: midX, top: midY, transform: `translate(-50%, -50%) scale(${arr.textSize ?? 1})`, pointerEvents: mode === 'draw' ? 'none' : 'auto' }}>
+                            <div className={`relative flex items-center justify-center px-1 rounded shadow-sm transition-all ${isEditingThis ? 'ring-2 ring-orange-500 bg-white' : 'bg-white/90 hover:bg-white'} ${mode === 'preview' ? 'bg-transparent shadow-none ring-0' : ''}`} onPointerDown={(e) => {
+                              if (mode === 'preview') return;
+                              e.stopPropagation();
+                              if (arr.id !== selectedArrowId) {
+                                setSelectedArrowId(arr.id);
+                                setEditAction('move');
+                              } else if (editAction === 'move') {
+                                startArrowDrag(e, arr.id, 'move_body');
+                              }
+                            }}>
+                              <input type="text" value={arr.label} onChange={(e) => setArrows(arrows.map(a => a.id === arr.id ? { ...a, label: e.target.value } : a))} onPointerDown={(e) => {
+                                e.stopPropagation();
+                                if (arr.id !== selectedArrowId) {
+                                  setSelectedArrowId(arr.id);
+                                  setEditAction('move');
+                                }
+                              }} className={`text-center font-bold outline-none bg-transparent text-xs ${isEditingThis ? 'text-orange-700' : 'text-sky-700'} ${mode === 'preview' ? 'border-none' : ''}`} style={{ width: `${Math.max(arr.label.length, 1)}ch`, minWidth: '10px' }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
+
