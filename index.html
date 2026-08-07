@@ -14,34 +14,120 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useRef, useEffect, useLayoutEffect } = React;
+        const { useState, useRef, useEffect, useLayoutEffect, useCallback } = React;
+
+        // Constante pour l'espace de travail global (permet de dessiner n'importe où)
+        const CANVAS_SIZE = 6000;
+
+        const getLinesLength = (html) => {
+            if (!html) return 1;
+            let text = html.replace(/<div><br><\/div>/gi, '\n')
+                           .replace(/<div>/gi, '\n')
+                           .replace(/<\/div>/gi, '')
+                           .replace(/<br\s*\/?>/gi, '\n')
+                           .replace(/&nbsp;/gi, ' ')
+                           .replace(/<[^>]+>/g, '');
+            const lines = text.split('\n');
+            return Math.max(...lines.map(l => l.trim().length), 1);
+        };
+
+        const EditableText = ({ value, onChange, onCommit, isPreview, textColor, arrowId, onPointerDown }) => {
+            const divRef = useRef(null);
+            
+            useEffect(() => {
+                if (divRef.current && divRef.current.innerHTML !== value) {
+                    divRef.current.innerHTML = value;
+                }
+            }, [value]);
+
+            return (
+                <div 
+                    ref={divRef}
+                    contentEditable={!isPreview} 
+                    suppressContentEditableWarning={true}
+                    data-arrow-id={arrowId}
+                    onInput={(e) => onChange(e.currentTarget.innerHTML)}
+                    onBlur={(e) => onCommit(e.currentTarget.innerHTML)}
+                    onPointerDown={onPointerDown}
+                    className="text-center font-bold outline-none bg-transparent text-xs pointer-events-auto cursor-text" 
+                    style={{ 
+                        color: textColor, 
+                        minWidth: '20px', 
+                        minHeight: '16px',
+                        whiteSpace: 'pre-wrap',
+                        display: 'inline-block',
+                        direction: 'ltr',
+                        unicodeBidi: 'plaintext',
+                        lineHeight: '1.2',
+                        wordBreak: 'break-word'
+                    }} 
+                />
+            );
+        };
 
         function App() {
           const [image, setImage] = useState(null);
+          const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
           const [arrows, setArrows] = useState([]);
           const [dots, setDots] = useState([]);
           const [mode, setMode] = useState('draw');
+          
+          // Historique Undo/Redo
+          const [history, setHistory] = useState([{ arrows: [], dots: [] }]);
+          const [historyIndex, setHistoryIndex] = useState(0);
+
           const [selectedArrowId, setSelectedArrowId] = useState(null);
           const [selectedDotId, setSelectedDotId] = useState(null);
           const [editAction, setEditAction] = useState('move');
           const [scale, setScale] = useState(1);
           const [lockAxis, setLockAxis] = useState(false);
+          const [cursorColor, setCursorColor] = useState(null);
           
           const scaleRef = useRef(1);
           const [dragState, setDragState] = useState(null);
           const [isMagnetic, setIsMagnetic] = useState(true);
+          const [isAltDown, setIsAltDown] = useState(false);
           
           const containerRef = useRef(null);
-          const imgRef = useRef(null);
           const exportRef = useRef(null);
           const targetScrollRef = useRef(null);
+
+          const saveToHistory = useCallback((newArrows, newDots) => {
+              setHistory(prev => {
+                  const current = prev.slice(0, historyIndex + 1);
+                  current.push({ arrows: newArrows, dots: newDots });
+                  if (current.length > 50) current.shift(); 
+                  return current;
+              });
+              setHistoryIndex(prev => Math.min(prev + 1, 50));
+          }, [historyIndex]);
+
+          const undo = () => {
+              if (historyIndex > 0) {
+                  const prev = history[historyIndex - 1];
+                  setArrows(prev.arrows);
+                  setDots(prev.dots);
+                  setHistoryIndex(historyIndex - 1);
+                  setSelectedArrowId(null); setSelectedDotId(null);
+              }
+          };
+
+          const redo = () => {
+              if (historyIndex < history.length - 1) {
+                  const next = history[historyIndex + 1];
+                  setArrows(next.arrows);
+                  setDots(next.dots);
+                  setHistoryIndex(historyIndex + 1);
+                  setSelectedArrowId(null); setSelectedDotId(null);
+              }
+          };
 
           const updateScale = (newScale) => {
             setScale(newScale);
             scaleRef.current = newScale;
           };
 
-          // Gestion du zoom et du scroll
+          // Gestion du zoom et du scroll fluide
           useLayoutEffect(() => {
             if (targetScrollRef.current && containerRef.current) {
               containerRef.current.scrollLeft = targetScrollRef.current.left;
@@ -50,56 +136,104 @@
             }
           }, [scale]);
 
+          const centerView = () => {
+              if (!containerRef.current) return;
+              const c = containerRef.current;
+              updateScale(1);
+              c.scrollLeft = (CANVAS_SIZE / 2) - (c.clientWidth / 2);
+              c.scrollTop = (CANVAS_SIZE / 2) - (c.clientHeight / 2);
+          };
+
+          useEffect(() => {
+            const handleSelChange = () => {
+                const activeEl = document.activeElement;
+                if (activeEl && activeEl.hasAttribute('data-arrow-id')) {
+                    try {
+                        const color = document.queryCommandValue('foreColor');
+                        if (color) {
+                            let hex = color;
+                            if (color.startsWith('rgb')) {
+                                const rgb = color.match(/\d+/g);
+                                if (rgb && rgb.length >= 3) {
+                                    hex = "#" + 
+                                        ("0" + parseInt(rgb[0]).toString(16)).slice(-2) +
+                                        ("0" + parseInt(rgb[1]).toString(16)).slice(-2) +
+                                        ("0" + parseInt(rgb[2]).toString(16)).slice(-2);
+                                }
+                            }
+                            setCursorColor(hex.toLowerCase());
+                        }
+                    } catch(e) {}
+                } else {
+                    setCursorColor(null);
+                }
+            };
+            document.addEventListener('selectionchange', handleSelChange);
+            return () => document.removeEventListener('selectionchange', handleSelChange);
+          }, []);
+
           useEffect(() => {
             const container = containerRef.current;
             if (!container) return;
 
             const handleTouchStart = (e) => {
               if (e.touches.length >= 2) setDragState(null);
-              if (e.touches.length === 2 && imgRef.current) {
+              if (e.touches.length === 2 && exportRef.current) {
                 const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
                 const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
                 const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-                const containerRect = container.getBoundingClientRect();
-                const imgRect = imgRef.current.getBoundingClientRect();
-                const ix = (cx - containerRect.left - (imgRect.left - containerRect.left)) / scaleRef.current;
-                const iy = (cy - containerRect.top - (imgRect.top - containerRect.top)) / scaleRef.current;
-                container._pinch = { dist, initialScale: scaleRef.current, cx, cy, ix, iy };
+                
+                const rect = container.getBoundingClientRect();
+                const mouseX = cx - rect.left;
+                const mouseY = cy - rect.top;
+                const absX = (container.scrollLeft + mouseX) / scaleRef.current;
+                const absY = (container.scrollTop + mouseY) / scaleRef.current;
+
+                container._pinch = { dist, initialScale: scaleRef.current, absX, absY, mouseX, mouseY };
               }
             };
 
             const handleTouchMove = (e) => {
-              if (e.touches.length === 2 && imgRef.current) {
+              if (e.touches.length === 2 && exportRef.current) {
                 e.preventDefault();
                 if (container._pinch) {
-                  const currentCx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-                  const currentCy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                  const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                  const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
                   const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
                   const ratio = dist / container._pinch.dist;
-                  const newScale = Math.min(Math.max(container._pinch.initialScale * ratio, 0.25), 5);
-                  const containerRect = container.getBoundingClientRect();
-                  const imgRect = imgRef.current.getBoundingClientRect();
-                  const baseOffsetX = imgRect.left - containerRect.left + container.scrollLeft;
-                  const baseOffsetY = imgRect.top - containerRect.top + container.scrollTop;
-                  targetScrollRef.current = { left: (container._pinch.ix * newScale) - (currentCx - containerRect.left) + baseOffsetX, top: (container._pinch.iy * newScale) - (currentCy - containerRect.top) + baseOffsetY };
+                  const newScale = Math.min(Math.max(container._pinch.initialScale * ratio, 0.1), 10);
+                  
+                  const rect = container.getBoundingClientRect();
+                  const currentMouseX = cx - rect.left;
+                  const currentMouseY = cy - rect.top;
+
+                  targetScrollRef.current = { 
+                      left: container._pinch.absX * newScale - currentMouseX, 
+                      top: container._pinch.absY * newScale - currentMouseY 
+                  };
                   updateScale(newScale);
                 }
               }
             };
 
             const handleWheel = (e) => {
-              if (imgRef.current) {
+              if (exportRef.current) {
                 e.preventDefault();
+                const rect = container.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                
                 const oldScale = scaleRef.current;
-                const newScale = Math.min(Math.max(oldScale * Math.pow(0.99, e.deltaY / 10), 0.25), 5);
+                const newScale = Math.min(Math.max(oldScale * Math.pow(0.99, e.deltaY / 10), 0.1), 10);
                 if (oldScale === newScale) return;
-                const containerRect = container.getBoundingClientRect();
-                const imgRect = imgRef.current.getBoundingClientRect();
-                const ix = (e.clientX - imgRect.left) / oldScale;
-                const iy = (e.clientY - imgRect.top) / oldScale;
-                const baseOffsetX = imgRect.left - containerRect.left + container.scrollLeft;
-                const baseOffsetY = imgRect.top - containerRect.top + container.scrollTop;
-                targetScrollRef.current = { left: (ix * newScale) - (e.clientX - containerRect.left) + baseOffsetX, top: (iy * newScale) - (e.clientY - containerRect.top) + baseOffsetY };
+
+                const absX = (container.scrollLeft + mouseX) / oldScale;
+                const absY = (container.scrollTop + mouseY) / oldScale;
+
+                targetScrollRef.current = { 
+                    left: absX * newScale - mouseX, 
+                    top: absY * newScale - mouseY 
+                };
                 updateScale(newScale);
               }
             };
@@ -117,38 +251,68 @@
           const handleImageUpload = (e) => {
             const file = e.target.files[0];
             if (file) {
-              setImage(URL.createObjectURL(file));
-              setArrows([]);
-              setDots([]);
-              setSelectedArrowId(null);
-              setSelectedDotId(null);
-              updateScale(1);
+              const reader = new FileReader();
+              reader.onload = (ev) => {
+                  setImage(ev.target.result);
+                  setArrows([]); setDots([]);
+                  setHistory([{ arrows: [], dots: [] }]);
+                  setHistoryIndex(0);
+                  setSelectedArrowId(null); setSelectedDotId(null);
+                  setTimeout(centerView, 100);
+              };
+              reader.readAsDataURL(file);
             }
           };
 
+          const handleSaveProject = () => {
+              const project = { image, arrows, dots };
+              const blob = new Blob([JSON.stringify(project)], { type: "application/json" });
+              const link = document.createElement('a');
+              link.download = 'projet-cotes.json';
+              link.href = URL.createObjectURL(blob);
+              link.click();
+          };
+
+          const handleLoadProject = (e) => {
+              const file = e.target.files[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = (ev) => {
+                  try {
+                      const project = JSON.parse(ev.target.result);
+                      setImage(project.image);
+                      setArrows(project.arrows || []);
+                      setDots(project.dots || []);
+                      setHistory([{ arrows: project.arrows || [], dots: project.dots || [] }]);
+                      setHistoryIndex(0);
+                      setSelectedArrowId(null); setSelectedDotId(null);
+                      setTimeout(centerView, 100);
+                  } catch (err) { alert("Fichier de projet invalide."); }
+              };
+              reader.readAsText(file);
+          };
+
+          // Fonctions de Zoom standard
           const zoomToCenter = (delta) => {
             const container = containerRef.current;
-            const imgEl = imgRef.current;
-            if (!container || !imgEl) return;
+            if (!container) return;
             const oldScale = scaleRef.current;
-            const newScale = Math.min(Math.max(oldScale + delta, 0.25), 5);
+            const newScale = Math.min(Math.max(oldScale + delta, 0.1), 10);
             if (oldScale === newScale) return;
-            const containerRect = container.getBoundingClientRect();
-            const imgRect = imgEl.getBoundingClientRect();
-            const cx = containerRect.left + containerRect.width / 2;
-            const cy = containerRect.top + containerRect.height / 2;
-            const ix = (cx - imgRect.left) / oldScale;
-            const iy = (cy - imgRect.top) / oldScale;
-            const baseOffsetX = imgRect.left - containerRect.left + container.scrollLeft;
-            const baseOffsetY = imgRect.top - containerRect.top + container.scrollTop;
-            targetScrollRef.current = { left: (ix * newScale) - (cx - containerRect.left) + baseOffsetX, top: (iy * newScale) - (cy - containerRect.top) + baseOffsetY };
+            
+            const cx = container.clientWidth / 2;
+            const cy = container.clientHeight / 2;
+            const absX = (container.scrollLeft + cx) / oldScale;
+            const absY = (container.scrollTop + cy) / oldScale;
+
+            targetScrollRef.current = { left: absX * newScale - cx, top: absY * newScale - cy };
             updateScale(newScale);
           };
 
           const getPointerCoords = (e) => {
-            const imgEl = imgRef.current;
-            if (!imgEl) return { x: 0, y: 0 };
-            const rect = imgEl.getBoundingClientRect();
+            const exportEl = exportRef.current;
+            if (!exportEl) return { x: 0, y: 0 };
+            const rect = exportEl.getBoundingClientRect();
             const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
             const clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
             return {
@@ -170,7 +334,22 @@
 
           const onPointerDown = (e) => {
             if (!image || mode === 'preview') return;
-            if (e.target.tagName === 'INPUT') return;
+            if (e.target.tagName === 'INPUT' || e.target.hasAttribute('contenteditable')) return;
+            
+            const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
+
+            if (e.altKey) {
+              setDragState({
+                type: 'pan',
+                startX: clientX,
+                startY: clientY,
+                startScrollLeft: containerRef.current.scrollLeft,
+                startScrollTop: containerRef.current.scrollTop
+              });
+              return;
+            }
+
             try { e.currentTarget.setPointerCapture(e.pointerId); } catch(err) {}
             const coords = getPointerCoords(e);
 
@@ -180,42 +359,44 @@
                 type: 'draw', 
                 startX: snap.x, startY: snap.y, 
                 currentX: snap.x, currentY: snap.y, 
-                hasMoved: false 
+                isDirty: false 
               });
-              setSelectedArrowId(null);
-              setSelectedDotId(null);
+              setSelectedArrowId(null); setSelectedDotId(null);
             } else if (mode === 'dot') {
               const newDot = { id: Date.now(), x: coords.x, y: coords.y, label: '1', size: 1, color: '#0284c7' };
-              setDots([...dots, newDot]);
+              const newDots = [...dots, newDot];
+              setDots(newDots);
+              saveToHistory(arrows, newDots);
               setSelectedDotId(newDot.id);
               setSelectedArrowId(null);
               setMode('select');
             } else if (mode === 'select') {
-              setSelectedArrowId(null);
-              setSelectedDotId(null);
+              setSelectedArrowId(null); setSelectedDotId(null);
             }
           };
 
           const onPointerMove = (e) => {
             if (!dragState) return;
+
+            const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
+
+            if (dragState.type === 'pan') {
+              containerRef.current.scrollLeft = dragState.startScrollLeft - (clientX - dragState.startX);
+              containerRef.current.scrollTop = dragState.startScrollTop - (clientY - dragState.startY);
+              return;
+            }
+
             const coords = getPointerCoords(e);
             
             if (dragState.type === 'draw') {
               const dist = Math.hypot(coords.x - dragState.startX, coords.y - dragState.startY);
               const snap = dist > 8 ? findSnap(coords.x, coords.y, null) : coords;
-              setDragState({
-                ...dragState,
-                currentX: snap.x,
-                currentY: snap.y,
-                hasMoved: dist > 8
-              });
+              setDragState({ ...dragState, currentX: snap.x, currentY: snap.y, isDirty: dist > 8 });
             } else if (dragState.type === 'move_start') {
               let snap = findSnap(coords.x, coords.y, dragState.id);
-              let targetX = snap.x;
-              let targetY = snap.y;
-
-              const isLocked = lockAxis || e.shiftKey;
-              if (isLocked) {
+              let targetX = snap.x; let targetY = snap.y;
+              if (lockAxis || e.shiftKey) {
                 const fx = dragState.initialX2, fy = dragState.initialY2;
                 const mx = dragState.initialX1, my = dragState.initialY1;
                 const dx = mx - fx, dy = my - fy;
@@ -224,19 +405,15 @@
                   const ux = dx / len, uy = dy / len;
                   const px = targetX - fx, py = targetY - fy;
                   const projL = px * ux + py * uy;
-                  targetX = fx + projL * ux;
-                  targetY = fy + projL * uy;
+                  targetX = fx + projL * ux; targetY = fy + projL * uy;
                 }
               }
+              setDragState({ ...dragState, isDirty: true });
               setArrows(arrows.map(a => a.id === dragState.id ? { ...a, x1: targetX, y1: targetY } : a));
-            
             } else if (dragState.type === 'move_end') {
               let snap = findSnap(coords.x, coords.y, dragState.id);
-              let targetX = snap.x;
-              let targetY = snap.y;
-
-              const isLocked = lockAxis || e.shiftKey;
-              if (isLocked) {
+              let targetX = snap.x; let targetY = snap.y;
+              if (lockAxis || e.shiftKey) {
                 const fx = dragState.initialX1, fy = dragState.initialY1;
                 const mx = dragState.initialX2, my = dragState.initialY2;
                 const dx = mx - fx, dy = my - fy;
@@ -245,48 +422,45 @@
                   const ux = dx / len, uy = dy / len;
                   const px = targetX - fx, py = targetY - fy;
                   const projL = px * ux + py * uy;
-                  targetX = fx + projL * ux;
-                  targetY = fy + projL * uy;
+                  targetX = fx + projL * ux; targetY = fy + projL * uy;
                 }
               }
+              setDragState({ ...dragState, isDirty: true });
               setArrows(arrows.map(a => a.id === dragState.id ? { ...a, x2: targetX, y2: targetY } : a));
-            
             } else if (dragState.type === 'move_body') {
               const dx = coords.x - dragState.startX;
               const dy = coords.y - dragState.startY;
-              let newX1 = dragState.initialX1 + dx;
-              let newY1 = dragState.initialY1 + dy;
-              let newX2 = dragState.initialX2 + dx;
-              let newY2 = dragState.initialY2 + dy;
+              let newX1 = dragState.initialX1 + dx; let newY1 = dragState.initialY1 + dy;
+              let newX2 = dragState.initialX2 + dx; let newY2 = dragState.initialY2 + dy;
 
               if (isMagnetic) {
                 const snap1 = findSnap(newX1, newY1, dragState.id);
                 if (snap1.x !== newX1 || snap1.y !== newY1) {
-                  newX1 = snap1.x;
-                  newY1 = snap1.y;
+                  newX1 = snap1.x; newY1 = snap1.y;
                   newX2 = dragState.initialX2 + (snap1.x - dragState.initialX1);
                   newY2 = dragState.initialY2 + (snap1.y - dragState.initialY1);
                 } else {
                   const snap2 = findSnap(newX2, newY2, dragState.id);
                   if (snap2.x !== newX2 || snap2.y !== newY2) {
-                    newX2 = snap2.x;
-                    newY2 = snap2.y;
+                    newX2 = snap2.x; newY2 = snap2.y;
                     newX1 = dragState.initialX1 + (snap2.x - dragState.initialX2);
                     newY1 = dragState.initialY1 + (snap2.y - dragState.initialY2);
                   }
                 }
               }
+              setDragState({ ...dragState, isDirty: true });
               setArrows(arrows.map(a => a.id === dragState.id ? { ...a, x1: newX1, y1: newY1, x2: newX2, y2: newY2 } : a));
             } else if (dragState.type === 'move_dot') {
               const dx = coords.x - dragState.lastX;
               const dy = coords.y - dragState.lastY;
+              setDragState({ ...dragState, lastX: coords.x, lastY: coords.y, isDirty: true });
               setDots(dots.map(d => d.id === dragState.id ? { ...d, x: d.x + dx, y: d.y + dy } : d));
-              setDragState({ ...dragState, lastX: coords.x, lastY: coords.y });
             } else if (dragState.type === 'rotate') {
               const currentAngle = Math.atan2(coords.y - dragState.cy, coords.x - dragState.cx);
               const deltaAngle = currentAngle - dragState.lastAngle;
               const cos = Math.cos(deltaAngle);
               const sin = Math.sin(deltaAngle);
+              setDragState({ ...dragState, lastAngle: currentAngle, isDirty: true });
               setArrows(arrows.map(a => {
                 if (a.id === dragState.id) {
                   return {
@@ -299,7 +473,6 @@
                 }
                 return a;
               }));
-              setDragState({ ...dragState, lastAngle: currentAngle });
             }
           };
 
@@ -307,23 +480,28 @@
             try { e.currentTarget.releasePointerCapture(e.pointerId); } catch(err) {}
             if (!dragState) return;
 
-            if (dragState.type === 'draw' && dragState.hasMoved) {
+            if (dragState.type === 'pan') {
+              setDragState(null);
+              return;
+            }
+
+            if (dragState.type === 'draw' && dragState.isDirty) {
               const newId = Date.now();
               const newArrow = {
                 id: newId,
                 x1: dragState.startX, y1: dragState.startY,
                 x2: dragState.currentX, y2: dragState.currentY,
-                label: 'X',
-                size: 1, textSize: 1, tickSize: 1,
-                color: '#0284c7',
-                ticks: [true, true, true, true],
-                heads: [true, true]
+                label: 'X', size: 1, textSize: 1, tickSize: 1,
+                color: '#0284c7', ticks: [true, true, true, true], heads: [true, true]
               };
-              setArrows([...arrows, newArrow]);
+              const newArrows = [...arrows, newArrow];
+              setArrows(newArrows);
+              saveToHistory(newArrows, dots);
               setSelectedArrowId(newId);
-              setSelectedDotId(null);
               setMode('select');
               setEditAction('move');
+            } else if (dragState.isDirty) {
+              saveToHistory(arrows, dots);
             }
             setDragState(null);
           };
@@ -339,16 +517,13 @@
             if (!arr) return;
 
             if (type === 'rotate') {
-              const cx = (arr.x1 + arr.x2) / 2;
-              const cy = (arr.y1 + arr.y2) / 2;
-              setDragState({ type, id, lastAngle: Math.atan2(coords.y - cy, coords.x - cx), cx, cy });
+              const cx = (arr.x1 + arr.x2) / 2; const cy = (arr.y1 + arr.y2) / 2;
+              setDragState({ type, id, lastAngle: Math.atan2(coords.y - cy, coords.x - cx), cx, cy, isDirty: false });
             } else {
               setDragState({ 
-                type, id, 
-                startX: coords.x, startY: coords.y, 
-                initialX1: arr.x1, initialY1: arr.y1, 
-                initialX2: arr.x2, initialY2: arr.y2, 
-                lastX: coords.x, lastY: coords.y 
+                type, id, startX: coords.x, startY: coords.y, 
+                initialX1: arr.x1, initialY1: arr.y1, initialX2: arr.x2, initialY2: arr.y2, 
+                lastX: coords.x, lastY: coords.y, isDirty: false 
               });
             }
           };
@@ -360,19 +535,38 @@
             setSelectedDotId(id);
             setSelectedArrowId(null);
             const coords = getPointerCoords(e);
-            setDragState({ type: 'move_dot', id, lastX: coords.x, lastY: coords.y });
+            setDragState({ type: 'move_dot', id, lastX: coords.x, lastY: coords.y, isDirty: false });
           };
 
           const toggleTick = (arrId, index, e) => {
             e.stopPropagation();
-            setArrows(arrows.map(a => {
+            const newArrows = arrows.map(a => {
               if (a.id === arrId) {
                 const newTicks = [...(a.ticks || [true, true, true, true])];
                 newTicks[index] = !newTicks[index];
                 return { ...a, ticks: newTicks };
               }
               return a;
-            }));
+            });
+            setArrows(newArrows);
+            saveToHistory(newArrows, dots);
+          };
+
+          const setExactArrowLength = (valStr) => {
+            if (!selectedArrowId) return;
+            const lenVal = valStr === '' ? 0 : parseFloat(valStr);
+            if (isNaN(lenVal)) return;
+            const newArrows = arrows.map(a => {
+              if (a.id !== selectedArrowId) return a;
+              const currentLen = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
+              if (currentLen === 0) return a;
+              const ratio = lenVal / currentLen;
+              const cx = (a.x1 + a.x2) / 2; const cy = (a.y1 + a.y2) / 2;
+              const dx = (a.x2 - a.x1) * ratio; const dy = (a.y2 - a.y1) * ratio;
+              return { ...a, x1: cx - dx / 2, y1: cy - dy / 2, x2: cx + dx / 2, y2: cy + dy / 2 };
+            });
+            setArrows(newArrows);
+            saveToHistory(newArrows, dots);
           };
 
           const duplicateSelectedArrow = () => {
@@ -380,26 +574,10 @@
             const target = arrows.find(a => a.id === selectedArrowId);
             if (!target) return;
             const newId = Date.now();
-            const duplicated = { ...target, id: newId, x1: target.x1 + 15, y1: target.y1 + 15, x2: target.x2 + 15, y2: target.y2 + 15 };
-            setArrows([...arrows, duplicated]);
+            const newArrows = [...arrows, { ...target, id: newId, x1: target.x1 + 50, y1: target.y1 + 50, x2: target.x2 + 50, y2: target.y2 + 50 }];
+            setArrows(newArrows);
+            saveToHistory(newArrows, dots);
             setSelectedArrowId(newId);
-          };
-
-          const setExactArrowLength = (valStr) => {
-            if (!selectedArrowId) return;
-            const lenVal = valStr === '' ? 0 : parseFloat(valStr);
-            if (isNaN(lenVal)) return;
-            setArrows(arrows.map(a => {
-              if (a.id !== selectedArrowId) return a;
-              const currentLen = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
-              if (currentLen === 0) return a;
-              const ratio = lenVal / currentLen;
-              const cx = (a.x1 + a.x2) / 2;
-              const cy = (a.y1 + a.y2) / 2;
-              const dx = (a.x2 - a.x1) * ratio;
-              const dy = (a.y2 - a.y1) * ratio;
-              return { ...a, x1: cx - dx / 2, y1: cy - dy / 2, x2: cx + dx / 2, y2: cy + dy / 2 };
-            }));
           };
 
           const duplicateSelectedDot = () => {
@@ -407,59 +585,164 @@
             const target = dots.find(d => d.id === selectedDotId);
             if (!target) return;
             const newId = Date.now();
-            const duplicated = { ...target, id: newId, x: target.x + 15, y: target.y + 15 };
-            setDots([...dots, duplicated]);
+            const newDots = [...dots, { ...target, id: newId, x: target.x + 50, y: target.y + 50 }];
+            setDots(newDots);
+            saveToHistory(arrows, newDots);
             setSelectedDotId(newId);
           };
 
           const deleteSelected = () => {
             if (selectedArrowId) {
-              setArrows(arrows.filter(a => a.id !== selectedArrowId));
+              const newArrows = arrows.filter(a => a.id !== selectedArrowId);
+              setArrows(newArrows);
+              saveToHistory(newArrows, dots);
               setSelectedArrowId(null);
             } else if (selectedDotId) {
-              setDots(dots.filter(d => d.id !== selectedDotId));
+              const newDots = dots.filter(d => d.id !== selectedDotId);
+              setDots(newDots);
+              saveToHistory(arrows, newDots);
               setSelectedDotId(null);
             }
           };
 
           const snapHorizontal = () => {
             if (!selectedArrowId) return;
-            setArrows(arrows.map(a => {
+            const newArrows = arrows.map(a => {
               if (a.id !== selectedArrowId) return a;
-              const cx = (a.x1 + a.x2) / 2;
-              const cy = (a.y1 + a.y2) / 2;
+              const cx = (a.x1 + a.x2) / 2; const cy = (a.y1 + a.y2) / 2;
               const len = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
               return { ...a, x1: cx - len / 2, y1: cy, x2: cx + len / 2, y2: cy };
-            }));
+            });
+            setArrows(newArrows);
+            saveToHistory(newArrows, dots);
           };
 
           const snapVertical = () => {
             if (!selectedArrowId) return;
-            setArrows(arrows.map(a => {
+            const newArrows = arrows.map(a => {
               if (a.id !== selectedArrowId) return a;
-              const cx = (a.x1 + a.x2) / 2;
-              const cy = (a.y1 + a.y2) / 2;
+              const cx = (a.x1 + a.x2) / 2; const cy = (a.y1 + a.y2) / 2;
               const len = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
               return { ...a, x1: cx, y1: cy - len / 2, x2: cx, y2: cy + len / 2 };
-            }));
+            });
+            setArrows(newArrows);
+            saveToHistory(newArrows, dots);
           };
 
+          useEffect(() => {
+            const handleKeyDown = (e) => {
+              if (e.key === 'Alt') setIsAltDown(true);
+              
+              const activeEl = document.activeElement;
+              const isTyping = activeEl && (activeEl.tagName === 'INPUT' || activeEl.hasAttribute('contenteditable') || activeEl.isContentEditable);
+              
+              if (!isTyping) {
+                if (e.key === 'Delete' || e.key === 'Backspace') {
+                  if (selectedArrowId || selectedDotId) {
+                    e.preventDefault();
+                    deleteSelected();
+                  }
+                }
+
+                // Gestion des flèches directionnelles
+                const isArrowKey = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key);
+                if (isArrowKey) {
+                  e.preventDefault(); // Empêche le défilement par défaut de la page
+
+                  const step = e.shiftKey ? 10 : 1; // 10 pixels avec Shift, sinon 1 pixel
+                  let dx = 0, dy = 0;
+
+                  if (e.key === 'ArrowUp') dy = -step;
+                  if (e.key === 'ArrowDown') dy = step;
+                  if (e.key === 'ArrowLeft') dx = -step;
+                  if (e.key === 'ArrowRight') dx = step;
+
+                  if (selectedArrowId) {
+                    const newArrows = arrows.map(a => {
+                      if (a.id !== selectedArrowId) return a;
+
+                      if (e.ctrlKey || e.metaKey) {
+                        // Avec Ctrl: Modifier la taille depuis l'extrémité (x2, y2)
+                        return { ...a, x2: a.x2 + dx, y2: a.y2 + dy };
+                      } else {
+                        // Sans Ctrl: Déplacer toute la flèche
+                        return { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy };
+                      }
+                    });
+                    setArrows(newArrows);
+                    saveToHistory(newArrows, dots);
+                  } else if (selectedDotId) {
+                     // Déplacer la gommette
+                     const newDots = dots.map(d => {
+                        if (d.id !== selectedDotId) return d;
+                        return { ...d, x: d.x + dx, y: d.y + dy };
+                     });
+                     setDots(newDots);
+                     saveToHistory(arrows, newDots);
+                  } else if (containerRef.current) {
+                     // Si rien n'est sélectionné, faire défiler le plan de travail (pan)
+                     const panStep = e.shiftKey ? 50 : 20;
+                     if (e.key === 'ArrowUp') containerRef.current.scrollTop -= panStep;
+                     if (e.key === 'ArrowDown') containerRef.current.scrollTop += panStep;
+                     if (e.key === 'ArrowLeft') containerRef.current.scrollLeft -= panStep;
+                     if (e.key === 'ArrowRight') containerRef.current.scrollLeft += panStep;
+                  }
+                }
+              }
+            };
+            
+            const handleKeyUp = (e) => {
+              if (e.key === 'Alt') setIsAltDown(false);
+            };
+            
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+            return () => {
+              window.removeEventListener('keydown', handleKeyDown);
+              window.removeEventListener('keyup', handleKeyUp);
+            };
+          }, [selectedArrowId, selectedDotId, arrows, dots]);
+
           const handleDownloadImage = () => {
-            if (!exportRef.current) return;
+            if (!exportRef.current || !image) return;
             const prevMode = mode;
             setMode('preview');
-            setSelectedArrowId(null);
-            setSelectedDotId(null);
+            setSelectedArrowId(null); setSelectedDotId(null);
+
+            // Calculer la zone exacte à capturer
+            let minX = CANVAS_SIZE; let minY = CANVAS_SIZE; let maxX = 0; let maxY = 0;
+            const imgLeft = CANVAS_SIZE/2 - imgSize.w/2;
+            const imgTop = CANVAS_SIZE/2 - imgSize.h/2;
+            minX = Math.min(minX, imgLeft); minY = Math.min(minY, imgTop);
+            maxX = Math.max(maxX, imgLeft + imgSize.w); maxY = Math.max(maxY, imgTop + imgSize.h);
+
+            arrows.forEach(a => {
+                minX = Math.min(minX, a.x1, a.x2); minY = Math.min(minY, a.y1, a.y2);
+                maxX = Math.max(maxX, a.x1, a.x2); maxY = Math.max(maxY, a.y1, a.y2);
+            });
+            dots.forEach(d => {
+                minX = Math.min(minX, d.x); minY = Math.min(minY, d.y);
+                maxX = Math.max(maxX, d.x); maxY = Math.max(maxY, d.y);
+            });
+            const PADDING = 40;
+            minX -= PADDING; minY -= PADDING; maxX += PADDING; maxY += PADDING;
+
+            const prevScale = scaleRef.current;
+            updateScale(1);
 
             setTimeout(() => {
-              html2canvas(exportRef.current, { scale: 2, useCORS: true }).then(canvas => {
+              html2canvas(exportRef.current, { 
+                x: minX, y: minY, width: maxX - minX, height: maxY - minY,
+                scale: 2, useCORS: true, backgroundColor: '#ffffff'
+              }).then(canvas => {
                 const link = document.createElement('a');
                 link.download = 'cote-finale.jpg';
                 link.href = canvas.toDataURL('image/jpeg', 0.95);
                 link.click();
+                updateScale(prevScale);
                 setMode(prevMode);
               });
-            }, 100);
+            }, 300);
           };
 
           const activeArrow = arrows.find(a => a.id === selectedArrowId);
@@ -467,26 +750,50 @@
           const colorsList = ['#0284c7', '#ea580c', '#dc2626', '#16a34a', '#7c3aed', '#0f172a'];
 
           return (
-            <div className="min-h-screen bg-slate-100 flex flex-col font-sans select-none overflow-hidden">
+            <div className="min-h-screen bg-slate-100 flex flex-col font-sans select-none overflow-hidden h-screen w-screen">
               {/* TOP TOOLBAR */}
               {mode !== 'preview' && (
-                <div className="bg-white shadow-sm border-b border-slate-200 p-3 flex flex-wrap gap-2 items-center justify-between z-20 relative">
-                  <label className="flex items-center gap-2 px-3 py-2 bg-slate-800 text-white rounded cursor-pointer hover:bg-slate-700 transition shadow-sm text-sm font-medium">
-                    <span>📁</span>
-                    <span className="hidden sm:inline">{image ? 'Changer' : 'Importer'}</span>
-                    <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-                  </label>
+                <div className="bg-white shadow-sm border-b border-slate-200 p-3 flex flex-wrap gap-2 items-center justify-between z-20 relative shrink-0">
+                  <div className="flex gap-2 items-center">
+                      <label className="flex items-center gap-2 px-3 py-2 bg-slate-800 text-white rounded cursor-pointer hover:bg-slate-700 transition shadow-sm text-sm font-medium">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                        <span className="hidden sm:inline">{image ? 'Changer Image' : 'Importer Image'}</span>
+                        <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                      </label>
+                      <button onClick={handleSaveProject} className="flex items-center gap-2 px-3 py-2 bg-indigo-600 text-white rounded cursor-pointer hover:bg-indigo-500 transition shadow-sm text-sm font-medium">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                        <span className="hidden sm:inline">Projet</span>
+                      </button>
+                      <label className="flex items-center gap-2 px-3 py-2 bg-indigo-600 text-white rounded cursor-pointer hover:bg-indigo-500 transition shadow-sm text-sm font-medium">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        <span className="hidden sm:inline">Ouvrir</span>
+                        <input type="file" accept=".json" onChange={handleLoadProject} className="hidden" />
+                      </label>
+                  </div>
 
                   {image && (
                     <div className="flex bg-slate-100 p-1 rounded border border-slate-200 shadow-inner">
-                      <button onClick={() => { setMode('draw'); setSelectedArrowId(null); setSelectedDotId(null); }} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${mode === 'draw' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>✏️ Flèche</button>
-                      <button onClick={() => { setMode('dot'); setSelectedArrowId(null); setSelectedDotId(null); }} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${mode === 'dot' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>🔵 Gommette</button>
-                      <button onClick={() => setMode('select')} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${mode === 'select' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>✋ Éditer</button>
-                      
+                      <button onClick={undo} disabled={historyIndex === 0} className={`px-3 py-2 rounded font-bold text-sm flex items-center justify-center ${historyIndex > 0 ? 'text-slate-700 hover:bg-white shadow-sm' : 'text-slate-300'}`} title="Annuler">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+                      </button>
+                      <button onClick={redo} disabled={historyIndex === history.length - 1} className={`px-3 py-2 rounded font-bold text-sm flex items-center justify-center ${historyIndex < history.length - 1 ? 'text-slate-700 hover:bg-white shadow-sm' : 'text-slate-300'}`} title="Rétablir">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"/></svg>
+                      </button>
                       <div className="w-px bg-slate-300 mx-1"></div>
                       
-                      <button onClick={() => setIsMagnetic(!isMagnetic)} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${isMagnetic ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-200'}`} title="Activer ou désactiver l'aimantation des flèches">
-                        🧲 {isMagnetic ? 'Aimant ON' : 'Aimant OFF'}
+                      <button onClick={() => { setMode('draw'); setSelectedArrowId(null); setSelectedDotId(null); }} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${mode === 'draw' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="17" y1="7" x2="7" y2="17"/><polyline points="17 17 17 7 7 7"/></svg> Flèche
+                      </button>
+                      <button onClick={() => { setMode('dot'); setSelectedArrowId(null); setSelectedDotId(null); }} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${mode === 'dot' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg> Gommette
+                      </button>
+                      <button onClick={() => setMode('select')} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${mode === 'select' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200'}`}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M10 10.5V5a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M6 14v-1a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M18 11a4 4 0 0 1 4 4v2a8 8 0 0 1-8 8h-2a8 8 0 0 1-8-8v-3.5"/></svg> Éditer
+                      </button>
+                      <div className="w-px bg-slate-300 mx-1"></div>
+                      <button onClick={() => setIsMagnetic(!isMagnetic)} className={`flex items-center gap-1.5 px-3 py-2 rounded transition-all font-bold text-xs sm:text-sm ${isMagnetic ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-200'}`} title="Aimantation">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M4 13v-3a8 8 0 0 1 16 0v3"/><path d="M4 13h4v5H4z"/><path d="M16 13h4v5h-4z"/></svg>
+                        <span className="hidden xl:inline">{isMagnetic ? 'Aimant ON' : 'Aimant OFF'}</span>
                       </button>
                     </div>
                   )}
@@ -494,45 +801,71 @@
                   {image && (
                     <div className="flex items-center gap-2">
                       <div className="flex items-center bg-slate-100 rounded border border-slate-200 shadow-inner text-slate-600 text-xs font-bold gap-1">
-                        <button onClick={() => zoomToCenter(-0.25)} className="p-2 hover:bg-slate-200 rounded-l">➖</button>
+                        <button onClick={() => zoomToCenter(-0.25)} className="p-2 hover:bg-slate-200 rounded-l">-</button>
                         <span className="w-9 text-center">{Math.round(scale * 100)}%</span>
-                        <button onClick={() => zoomToCenter(0.25)} className="p-2 hover:bg-slate-200 rounded-r">➕</button>
+                        <button onClick={() => zoomToCenter(0.25)} className="p-2 hover:bg-slate-200 rounded-r">+</button>
                       </div>
-                      <button onClick={handleDownloadImage} className="flex items-center gap-1 px-3 py-2 rounded text-xs sm:text-sm font-bold transition shadow-sm bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100">💾 Enregistrer</button>
-                      <button onClick={() => { setSelectedArrowId(null); setSelectedDotId(null); setMode('preview'); }} className="flex items-center gap-1 px-3 py-2 rounded text-xs sm:text-sm font-bold transition shadow-sm bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100">📷 Rendu</button>
+                      <button onClick={handleDownloadImage} className="flex items-center gap-1 px-3 py-2 rounded text-xs sm:text-sm font-bold transition shadow-sm bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Screenshot
+                      </button>
+                      <button onClick={() => { setSelectedArrowId(null); setSelectedDotId(null); setMode('preview'); }} className="flex items-center gap-1 px-3 py-2 rounded text-xs sm:text-sm font-bold transition shadow-sm bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Rendu
+                      </button>
                     </div>
                   )}
                 </div>
               )}
 
-              {/* BARRE D'OUTILS D'ÉDITION NOIRE */}
+              {/* BARRE D'OUTILS NOIRE */}
               {image && mode !== 'preview' && (
-                <div className="bg-slate-800 text-white p-2.5 flex flex-wrap justify-center items-center gap-2 z-30 relative shadow-lg min-h-[56px] text-xs">
-                  {selectedArrowId ? (
+                <div className="bg-slate-800 text-white p-2.5 flex flex-wrap justify-center items-center gap-2 z-30 relative shadow-lg min-h-[56px] text-xs shrink-0">
+                  {selectedArrowId && activeArrow ? (
                     <>
                       <span className="text-slate-300 font-medium hidden sm:inline">Action:</span>
-                      <button onClick={() => setEditAction('move')} className={`px-2 py-1.5 rounded transition ${editAction === 'move' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>✋ Bouger</button>
-                      <button onClick={() => setEditAction('resize')} className={`px-2 py-1.5 rounded transition ${editAction === 'resize' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>📏 Extrémités</button>
+                      <button onClick={() => setEditAction('move')} className={`px-2 py-1.5 rounded transition ${editAction === 'move' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>Bouger</button>
+                      <button onClick={() => setEditAction('resize')} className={`px-2 py-1.5 rounded transition ${editAction === 'resize' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>Extrémités</button>
                       
                       {editAction === 'resize' && (
-                        <button 
-                          onClick={() => setLockAxis(!lockAxis)} 
-                          className={`px-1.5 py-1.5 rounded transition font-bold text-[10px] uppercase shadow-inner ${lockAxis ? 'bg-indigo-500 text-white' : 'bg-slate-600 text-slate-300 hover:bg-slate-500'}`}
-                          title="Bloquer l'axe pour étirer la flèche tout droit"
-                        >
-                          {lockAxis ? '🔒 Droit' : '🔓 Libre'}
+                        <button onClick={() => setLockAxis(!lockAxis)} className={`px-1.5 py-1.5 rounded transition font-bold text-[10px] uppercase shadow-inner ${lockAxis ? 'bg-indigo-500 text-white' : 'bg-slate-600 text-slate-300 hover:bg-slate-500'}`} title="Bloquer l'axe">
+                          {lockAxis ? 'Bloqué' : 'Libre'}
                         </button>
                       )}
 
-                      <button onClick={() => setEditAction('rotate')} className={`px-2 py-1.5 rounded transition ${editAction === 'rotate' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>🔄 Pivot</button>
-                      
+                      <button onClick={() => setEditAction('rotate')} className={`px-2 py-1.5 rounded transition ${editAction === 'rotate' ? 'bg-orange-500 text-white shadow' : 'bg-slate-700 hover:bg-slate-600'}`}>Pivot</button>
                       <div className="w-px h-5 bg-slate-600 mx-0.5"></div>
                       
                       <div className="flex items-center gap-1 bg-slate-700 px-1 py-1 rounded">
                         <div className="flex gap-1">
-                          {colorsList.map(c => (
-                            <button key={c} onClick={() => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, color: c } : a))} style={{ backgroundColor: c }} className={`w-4 h-4 rounded-full border ${activeArrow?.color === c ? 'border-white scale-125' : 'border-transparent'}`} />
-                          ))}
+                          {colorsList.map(c => {
+                            const isSelectedColor = (cursorColor || activeArrow?.color) === c;
+                            return (
+                                <button 
+                                  key={c} 
+                                  onMouseDown={(e) => {
+                                    e.preventDefault(); 
+                                    const selection = window.getSelection();
+                                    const activeEl = document.activeElement;
+                                    
+                                    if (selection.rangeCount > 0 && !selection.isCollapsed && activeEl && activeEl.getAttribute('data-arrow-id') === selectedArrowId.toString()) {
+                                      document.execCommand('styleWithCSS', false, true);
+                                      document.execCommand('foreColor', false, c);
+                                      const arrowId = parseInt(activeEl.getAttribute('data-arrow-id'), 10);
+                                      const newArrows = arrows.map(a => a.id === arrowId ? { ...a, label: activeEl.innerHTML } : a);
+                                      setArrows(newArrows);
+                                      saveToHistory(newArrows, dots);
+                                      setCursorColor(c);
+                                    } else {
+                                      const newArrows = arrows.map(a => a.id === selectedArrowId ? { ...a, color: c } : a);
+                                      setArrows(newArrows);
+                                      saveToHistory(newArrows, dots);
+                                      if (activeEl && activeEl.hasAttribute('data-arrow-id')) setCursorColor(c);
+                                    }
+                                  }} 
+                                  style={{ backgroundColor: c }} 
+                                  className={`w-4 h-4 rounded-full border ${isSelectedColor ? 'border-white scale-125' : 'border-transparent'}`} 
+                                />
+                            );
+                          })}
                         </div>
                       </div>
 
@@ -544,295 +877,306 @@
                       <div className="flex flex-col items-center bg-slate-700 px-1.5 py-1 rounded">
                         <div className="flex items-center gap-1">
                           <span title="Épaisseur du trait principal">Ép:</span>
-                          <input type="range" min="0.2" max="3" step="0.1" value={activeArrow?.size ?? 1} onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, size: parseFloat(e.target.value) || 0 } : a))} className="w-10 sm:w-14 accent-orange-500 cursor-pointer" />
+                          <input type="range" min="0.2" max="3" step="0.1" value={activeArrow?.size ?? 1} 
+                             onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, size: parseFloat(e.target.value) || 0 } : a))} 
+                             onPointerUp={() => saveToHistory(arrows, dots)}
+                             className="w-10 sm:w-14 accent-orange-500 cursor-pointer" />
                         </div>
-                        <input type="number" step="0.1" value={activeArrow?.size ?? 1} onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, size: e.target.value === '' ? '' : parseFloat(e.target.value) } : a))} className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
+                        <input type="number" step="0.1" value={activeArrow?.size ?? 1} 
+                           onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, size: e.target.value === '' ? '' : parseFloat(e.target.value) } : a))} 
+                           onBlur={() => saveToHistory(arrows, dots)}
+                           className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
                       </div>
 
                       <div className="flex flex-col items-center bg-slate-700 px-1.5 py-1 rounded">
                         <div className="flex items-center gap-1">
                           <span title="Taille du Texte">Texte:</span>
-                          <input type="range" min="0.5" max="3" step="0.1" value={activeArrow?.textSize ?? 1} onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, textSize: parseFloat(e.target.value) || 0 } : a))} className="w-10 sm:w-14 accent-orange-500 cursor-pointer" />
+                          <input type="range" min="0.5" max="3" step="0.1" value={activeArrow?.textSize ?? 1} 
+                             onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, textSize: parseFloat(e.target.value) || 0 } : a))} 
+                             onPointerUp={() => saveToHistory(arrows, dots)}
+                             className="w-10 sm:w-14 accent-orange-500 cursor-pointer" />
                         </div>
-                        <input type="number" step="0.1" value={activeArrow?.textSize ?? 1} onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, textSize: e.target.value === '' ? '' : parseFloat(e.target.value) } : a))} className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
+                        <input type="number" step="0.1" value={activeArrow?.textSize ?? 1} 
+                           onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, textSize: e.target.value === '' ? '' : parseFloat(e.target.value) } : a))} 
+                           onBlur={() => saveToHistory(arrows, dots)}
+                           className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
                       </div>
 
                       <div className="flex flex-col items-center bg-slate-700 px-1.5 py-1 rounded">
                         <div className="flex items-center gap-1">
                           <span title="Longueur des taquets aux bords">Barres:</span>
-                          <input type="range" min="0.5" max="4" step="0.1" value={activeArrow?.tickSize ?? 1} onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, tickSize: parseFloat(e.target.value) || 0 } : a))} className="w-10 sm:w-14 accent-orange-500 cursor-pointer" />
+                          <input type="range" min="0.5" max="4" step="0.1" value={activeArrow?.tickSize ?? 1} 
+                             onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, tickSize: parseFloat(e.target.value) || 0 } : a))} 
+                             onPointerUp={() => saveToHistory(arrows, dots)}
+                             className="w-10 sm:w-14 accent-orange-500 cursor-pointer" />
                         </div>
-                        <input type="number" step="0.1" value={activeArrow?.tickSize ?? 1} onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, tickSize: e.target.value === '' ? '' : parseFloat(e.target.value) } : a))} className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
+                        <input type="number" step="0.1" value={activeArrow?.tickSize ?? 1} 
+                           onChange={(e) => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, tickSize: e.target.value === '' ? '' : parseFloat(e.target.value) } : a))} 
+                           onBlur={() => saveToHistory(arrows, dots)}
+                           className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
                       </div>
 
                       <div className="flex items-center gap-1 bg-slate-700 px-1.5 py-1 rounded">
                         <span className="hidden xl:inline">Pointes:</span>
-                        <button onClick={() => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, heads: [!(a.heads?.[0] ?? true), a.heads?.[1] ?? true] } : a))} className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-colors ${activeArrow?.heads?.[0] ?? true ? 'bg-orange-500 text-white' : 'bg-slate-600 text-slate-400'}`}>DÉBUT</button>
-                        <button onClick={() => setArrows(arrows.map(a => a.id === selectedArrowId ? { ...a, heads: [a.heads?.[0] ?? true, !(a.heads?.[1] ?? true)] } : a))} className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-colors ${activeArrow?.heads?.[1] ?? true ? 'bg-orange-500 text-white' : 'bg-slate-600 text-slate-400'}`}>FIN</button>
+                        <button onClick={() => { const na = arrows.map(a => a.id === selectedArrowId ? { ...a, heads: [!(a.heads?.[0] ?? true), a.heads?.[1] ?? true] } : a); setArrows(na); saveToHistory(na, dots); }} className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-colors ${activeArrow?.heads?.[0] ?? true ? 'bg-orange-500 text-white' : 'bg-slate-600 text-slate-400'}`}>DÉBUT</button>
+                        <button onClick={() => { const na = arrows.map(a => a.id === selectedArrowId ? { ...a, heads: [a.heads?.[0] ?? true, !(a.heads?.[1] ?? true)] } : a); setArrows(na); saveToHistory(na, dots); }} className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-colors ${activeArrow?.heads?.[1] ?? true ? 'bg-orange-500 text-white' : 'bg-slate-600 text-slate-400'}`}>FIN</button>
                       </div>
 
-                      <div className="w-px h-6 bg-slate-600 mx-0.5 hidden xl:block"></div>
-                      <button onClick={snapHorizontal} className="px-1.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded hidden xl:block">Horiz.</button>
-                      <button onClick={snapVertical} className="px-1.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded hidden xl:block">Vertic.</button>
-                      <button onClick={duplicateSelectedArrow} className="px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium shadow">📋 Dupliquer</button>
-                      <button onClick={deleteSelected} className="px-2.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded font-bold shadow">🗑️</button>
+                      <div className="w-px h-6 bg-slate-600 mx-0.5"></div>
+                      <button onClick={snapHorizontal} className="px-1.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">Horiz.</button>
+                      <button onClick={snapVertical} className="px-1.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">Vertic.</button>
+                      <button onClick={duplicateSelectedArrow} className="flex items-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium shadow">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Dupliq.
+                      </button>
+                      <button onClick={deleteSelected} className="flex items-center gap-1 px-2.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded font-bold shadow">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                      </button>
                     </>
-                  ) : selectedDotId ? (
+                  ) : selectedDotId && activeDot ? (
                     <>
                       <span className="text-amber-400 font-medium">Gommette :</span>
                       <div className="flex items-center gap-1 bg-slate-700 px-2 py-1 rounded">
                         <span>Couleur:</span>
                         <div className="flex gap-1">
                           {colorsList.map(c => (
-                            <button key={c} onClick={() => setDots(dots.map(d => d.id === selectedDotId ? { ...d, color: c } : d))} style={{ backgroundColor: c }} className={`w-4 h-4 rounded-full border ${activeDot?.color === c ? 'border-white scale-125' : 'border-transparent'}`} />
+                            <button key={c} onClick={() => { const nd = dots.map(d => d.id === selectedDotId ? { ...d, color: c } : d); setDots(nd); saveToHistory(arrows, nd); }} style={{ backgroundColor: c }} className={`w-4 h-4 rounded-full border ${activeDot?.color === c ? 'border-white scale-125' : 'border-transparent'}`} />
                           ))}
                         </div>
                       </div>
                       <div className="flex flex-col items-center bg-slate-700 px-2 py-1 rounded">
                         <div className="flex items-center gap-1">
                           <span>Taille:</span>
-                          <input type="range" min="0.5" max="3" step="0.1" value={activeDot?.size ?? 1} onChange={(e) => setDots(dots.map(d => d.id === selectedDotId ? { ...d, size: parseFloat(e.target.value) || 0 } : d))} className="w-16 accent-amber-500 cursor-pointer" />
+                          <input type="range" min="0.5" max="3" step="0.1" value={activeDot?.size ?? 1} 
+                             onChange={(e) => setDots(dots.map(d => d.id === selectedDotId ? { ...d, size: parseFloat(e.target.value) || 0 } : d))} 
+                             onPointerUp={() => saveToHistory(arrows, dots)}
+                             className="w-16 accent-amber-500 cursor-pointer" />
                         </div>
-                        <input type="number" step="0.1" value={activeDot?.size ?? 1} onChange={(e) => setDots(dots.map(d => d.id === selectedDotId ? { ...d, size: e.target.value === '' ? '' : parseFloat(e.target.value) } : d))} className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
+                        <input type="number" step="0.1" value={activeDot?.size ?? 1} 
+                             onChange={(e) => setDots(dots.map(d => d.id === selectedDotId ? { ...d, size: e.target.value === '' ? '' : parseFloat(e.target.value) } : d))} 
+                             onBlur={() => saveToHistory(arrows, dots)}
+                             className="w-12 bg-slate-800 text-white text-center rounded px-0.5 mt-0.5 text-[10px] outline-none font-bold" />
                       </div>
-                      <button onClick={duplicateSelectedDot} className="px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium shadow">📋 Dupliquer</button>
-                      <button onClick={deleteSelected} className="px-2.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded font-bold shadow">🗑️</button>
+                      <button onClick={duplicateSelectedDot} className="flex items-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium shadow">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Dupliq.
+                      </button>
+                      <button onClick={deleteSelected} className="flex items-center gap-1 px-2.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded font-bold shadow">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                      </button>
                     </>
                   ) : (
-                    <span className="text-amber-400 font-medium italic">👉 Touchez une flèche pour l'éditer. Touchez ses "barres" pour les masquer/afficher !</span>
+                    <span className="text-amber-400 font-medium italic">Touchez une flèche ou une gommette pour l'éditer.</span>
                   )}
                 </div>
               )}
 
-              {/* PREVIEW BANNER */}
               {image && mode === 'preview' && (
-                <div className="bg-emerald-600 text-white text-center py-2 px-4 text-xs sm:text-sm font-bold flex justify-center items-center gap-4 z-40 shadow-md">
-                  <span>📸 Rendu Final actif (Prêt pour capture d'écran)</span>
-                  <button onClick={() => setMode('select')} className="bg-white text-emerald-800 px-3 py-1 rounded text-xs hover:bg-emerald-50 transition shadow">⬅️ Édition</button>
+                <div className="bg-emerald-600 text-white text-center py-2 px-4 text-xs sm:text-sm font-bold flex justify-center items-center gap-4 z-40 shadow-md shrink-0">
+                  <span>Rendu Final actif (Prêt pour capture d'écran)</span>
+                  <button onClick={() => setMode('select')} className="bg-white text-emerald-800 px-3 py-1 rounded text-xs hover:bg-emerald-50 transition shadow">Retour à l'Édition</button>
                 </div>
               )}
 
-              {/* ESPACE DE TRAVAIL */}
-              <div ref={containerRef} className="flex-1 overflow-auto bg-slate-200 p-4 flex justify-center items-center">
+              {}
+              <div ref={containerRef} className="flex-1 overflow-auto bg-slate-200 relative w-full h-full">
                 {!image ? (
-                  <div className="mt-20 flex flex-col items-center opacity-50">
-                    <p className="text-xl mb-2">📁</p>
-                    <p>Veuillez importer une image.</p>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center opacity-50">
+                    <svg className="mb-4 text-slate-400" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <p className="font-bold text-lg text-slate-500">Veuillez importer une image pour commencer.</p>
                   </div>
                 ) : (
-                  <div className="inline-block relative" ref={exportRef}>
+                  <div 
+                    ref={exportRef}
+                    style={{ 
+                        width: `${CANVAS_SIZE}px`, height: `${CANVAS_SIZE}px`, 
+                        transform: `scale(${scale})`, transformOrigin: '0 0', 
+                        backgroundColor: '#ffffff', position: 'relative' 
+                    }}
+                  >
                     <div 
-                      style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }} 
-                      className={`relative bg-white border-2 border-transparent ${mode === 'preview' ? 'shadow-none border-none' : 'shadow-2xl'}`}
+                      className="absolute inset-0"
+                      style={{ 
+                        touchAction: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+                        cursor: isAltDown ? (dragState?.type === 'pan' ? 'grabbing' : 'grab') : (mode === 'draw' ? 'crosshair' : 'default')
+                      }}
+                      onPointerDown={onPointerDown}
+                      onPointerMove={onPointerMove}
+                      onPointerUp={onPointerUp}
+                      onPointerCancel={onPointerUp}
                     >
-                      <div 
-                        className={`relative inline-block ${mode === 'draw' ? 'cursor-crosshair' : ''}`}
-                        style={{ touchAction: 'none', userSelect: 'none', WebkitUserSelect: 'none' }}
-                        onPointerDown={onPointerDown}
-                        onPointerMove={onPointerMove}
-                        onPointerUp={onPointerUp}
-                        onPointerCancel={onPointerUp}
-                      >
-                        <img 
-                          ref={imgRef} 
-                          src={image} 
-                          alt="Support" 
-                          className="max-w-[95vw] md:max-w-[80vw] object-contain block select-none pointer-events-none" 
-                          draggable={false} 
-                        />
-                        
-                        <svg className="absolute top-0 left-0 w-full h-full overflow-visible pointer-events-none">
-                          {arrows.map(arr => {
-                            const isSelected = arr.id === selectedArrowId;
-                            const isEditingThis = isSelected && mode === 'select';
-                            const baseColor = arr.color || '#0284c7';
-                            const color = mode === 'preview' ? baseColor : (isSelected && mode !== 'preview' ? "#ea580c" : baseColor);
-                            
-                            const x1 = arr.x1;
-                            const y1 = arr.y1;
-                            const x2 = arr.x2;
-                            const y2 = arr.y2;
-                            
-                            const angle = Math.atan2(y2 - y1, x2 - x1);
-                            const tSize = (arr.tickSize ?? 1) * 8;
-                            
-                            const perpX = Math.sin(angle) * tSize;
-                            const perpY = -Math.cos(angle) * tSize;
-
-                            const headLen = 8 * (arr.size || 1);
-                            const ticks = arr.ticks || [true, true, true, true];
-                            const heads = arr.heads || [true, true];
-                            
-                            // Calcul du milieu et de la coupure de ligne pour le texte
-                            const midX = (x1 + x2) / 2;
-                            const midY = (y1 + y2) / 2;
-                            const textLenHalf = Math.max(arr.label.length * 4 * (arr.textSize ?? 1), 12); // Demi-longueur de la fenêtre de texte
-                            
-                            const dirX = Math.cos(angle);
-                            const dirY = Math.sin(angle);
-                            
-                            // Point de départ et de fin de la coupure centrale
-                            const cutX1 = midX - dirX * textLenHalf;
-                            const cutY1 = midY - dirY * textLenHalf;
-                            const cutX2 = midX + dirX * textLenHalf;
-                            const cutY2 = midY + dirY * textLenHalf;
-
-                            const renderTickHalf = (x, y, pX, pY, isVisible, index, arrId) => (
-                              <g key={`tick-${arrId}-${index}`}>
-                                {isVisible && (
-                                  <line x1={x} y1={y} x2={x + pX} y2={y + pY} stroke={color} strokeWidth={(isEditingThis && mode !== 'preview' ? 1.5 : 1) * (arr.size || 1)} />
-                                )}
-                                {isEditingThis && mode !== 'preview' && (
-                                  <line x1={x} y1={y} x2={x + pX} y2={y + pY} stroke="transparent" strokeWidth="20" className="pointer-events-auto cursor-pointer tick-clickable"
-                                    onPointerDown={(e) => toggleTick(arrId, index, e)}
-                                  />
-                                )}
-                              </g>
-                            );
-
-                            return (
-                              <g key={`line-${arr.id}`}>
-                                {mode !== 'preview' && (
-                                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="transparent" strokeWidth="30" className="pointer-events-auto cursor-pointer" onPointerDown={(e) => {
-                                    if (mode === 'draw') return;
-                                    e.stopPropagation();
-                                    if (arr.id !== selectedArrowId) {
-                                      setSelectedArrowId(arr.id);
-                                      setSelectedDotId(null);
-                                      setEditAction('move');
-                                      startArrowDrag(e, arr.id, 'move_body');
-                                    } else if (editAction === 'move') {
-                                      startArrowDrag(e, arr.id, 'move_body');
-                                    } else if (editAction === 'rotate') {
-                                      startArrowDrag(e, arr.id, 'rotate');
-                                    }
-                                  }} />
-                                )}
-                                
-                                {/* Segment 1 : Du début (x1, y1) jusqu'au début du texte (cutX1, cutY1) */}
-                                <line x1={x1} y1={y1} x2={cutX1} y2={cutY1} stroke={color} strokeWidth={(isEditingThis && mode !== 'preview' ? 1.5 : 1) * (arr.size || 1)} />
-                                
-                                {/* Segment 2 : De la fin du texte (cutX2, cutY2) jusqu'à la fin (x2, y2) */}
-                                <line x1={cutX2} y1={cutY2} x2={x2} y2={y2} stroke={color} strokeWidth={(isEditingThis && mode !== 'preview' ? 1.5 : 1) * (arr.size || 1)} />
-                                
-                                {renderTickHalf(x1, y1, perpX, perpY, ticks[0], 0, arr.id)}
-                                {renderTickHalf(x1, y1, -perpX, -perpY, ticks[1], 1, arr.id)}
-                                {renderTickHalf(x2, y2, perpX, perpY, ticks[2], 2, arr.id)}
-                                {renderTickHalf(x2, y2, -perpX, -perpY, ticks[3], 3, arr.id)}
-
-                                {heads[0] && (
-                                  <polygon points={`${x1},${y1} ${x1 + headLen * Math.cos(angle + 0.4)},${y1 + headLen * Math.sin(angle + 0.4)} ${x1 + headLen * Math.cos(angle - 0.4)},${y1 + headLen * Math.sin(angle - 0.4)}`} fill={color} />
-                                )}
-                                {heads[1] && (
-                                  <polygon points={`${x2},${y2} ${x2 - headLen * Math.cos(angle + 0.4)},${y2 - headLen * Math.sin(angle + 0.4)} ${x2 - headLen * Math.cos(angle - 0.4)},${y2 - headLen * Math.sin(angle - 0.4)}`} fill={color} />
-                                )}
-
-                                {isEditingThis && editAction === 'resize' && mode !== 'preview' && (
-                                  <>
-                                    <circle cx={x1} cy={y1} r="8" fill="white" stroke="#ea580c" strokeWidth="2" className="pointer-events-auto cursor-crosshair" onPointerDown={(e) => { e.stopPropagation(); startArrowDrag(e, arr.id, 'move_start'); }} />
-                                    <circle cx={x2} cy={y2} r="8" fill="white" stroke="#ea580c" strokeWidth="2" className="pointer-events-auto cursor-crosshair" onPointerDown={(e) => { e.stopPropagation(); startArrowDrag(e, arr.id, 'move_end'); }} />
-                                  </>
-                                )}
-                              </g>
-                            );
-                          })}
-
-                          {dragState && dragState.type === 'draw' && dragState.hasMoved && (
-                            <line x1={dragState.startX} y1={dragState.startY} x2={dragState.currentX} y2={dragState.currentY} stroke="#0284c7" strokeWidth="2" strokeDasharray="4" />
-                          )}
-                        </svg>
-
-                        {/* ÉTIQUETTES DE TEXTE */}
+                      <img 
+                        src={image} 
+                        alt="Support" 
+                        onLoad={(e) => setImgSize({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+                        style={{ position: 'absolute', left: CANVAS_SIZE/2 - imgSize.w/2, top: CANVAS_SIZE/2 - imgSize.h/2 }}
+                        className="block select-none pointer-events-none" 
+                        draggable={false} 
+                      />
+                      
+                      <svg className="absolute top-0 left-0 w-full h-full overflow-visible pointer-events-none">
                         {arrows.map(arr => {
                           const isSelected = arr.id === selectedArrowId;
                           const isEditingThis = isSelected && mode === 'select';
-                          const midX = (arr.x1 + arr.x2) / 2;
-                          const midY = (arr.y1 + arr.y2) / 2;
-                          const textColor = arr.color || '#0284c7';
+                          const baseColor = arr.color || '#0284c7';
+                          const color = mode === 'preview' ? baseColor : (isSelected && mode !== 'preview' ? "#ea580c" : baseColor);
+                          
+                          const x1 = arr.x1; const y1 = arr.y1;
+                          const x2 = arr.x2; const y2 = arr.y2;
+                          
+                          const angle = Math.atan2(y2 - y1, x2 - x1);
+                          const tSize = (arr.tickSize ?? 1) * 8;
+                          const perpX = Math.sin(angle) * tSize; const perpY = -Math.cos(angle) * tSize;
+                          const headLen = 8 * (arr.size || 1);
+                          const ticks = arr.ticks || [true, true, true, true];
+                          const heads = arr.heads || [true, true];
+                          
+                          const midX = (x1 + x2) / 2; const midY = (y1 + y2) / 2;
+                          const textLines = (arr.label || '').split(/<br>|<div>|<\/div>|\n/).filter(line => line.replace(/<[^>]+>/g, '').trim().length > 0).length || 1;
+                          const maxChars = getLinesLength(arr.label);
+                          
+                          // AMÉLIORATION DU CALCUL DE L'ESPACE : 
+                          // On augmente un peu la marge (4.5 -> 5 pour la largeur, 7 -> 8 pour la hauteur)
+                          // et on assure une base minimum un peu plus large (12 -> 16).
+                          const textLenHalfX = Math.max(maxChars * 5 * (arr.textSize ?? 1), 16);
+                          const textLenHalfY = Math.max(textLines * 8 * (arr.textSize ?? 1), 16);
+                          
+                          const dirX = Math.cos(angle); const dirY = Math.sin(angle);
+                          
+                          const absDirX = Math.abs(dirX);
+                          const absDirY = Math.abs(dirY);
+                          
+                          // On ajoute un padding statique (+8 au lieu de +6) pour garantir un bon espace
+                          const rX = absDirX > 0.001 ? (textLenHalfX + 8) / absDirX : Infinity;
+                          const rY = absDirY > 0.001 ? (textLenHalfY + 8) / absDirY : Infinity;
+                          const cutRadius = Math.min(rX, rY);
+                          
+                          const cutX1 = midX - dirX * cutRadius; const cutY1 = midY - dirY * cutRadius;
+                          const cutX2 = midX + dirX * cutRadius; const cutY2 = midY + dirY * cutRadius;
+                          const totalDist = Math.hypot(x2 - x1, y2 - y1);
+                          const skipLine = totalDist < (cutRadius * 2);
+
+                          const renderTickHalf = (x, y, pX, pY, isVisible, index, arrId) => (
+                            <g key={`tick-${arrId}-${index}`}>
+                              {isVisible && <line x1={x} y1={y} x2={x + pX} y2={y + pY} stroke={color} strokeWidth={(isEditingThis && mode !== 'preview' ? 1.5 : 1) * (arr.size || 1)} />}
+                              {isEditingThis && mode !== 'preview' && (
+                                <line x1={x} y1={y} x2={x + pX} y2={y + pY} stroke="transparent" strokeWidth="20" className="pointer-events-auto cursor-pointer" onPointerDown={(e) => toggleTick(arrId, index, e)} />
+                              )}
+                            </g>
+                          );
 
                           return (
-                            <div key={`text-${arr.id}`} className="absolute z-20 flex items-center justify-center group" style={{ left: midX, top: midY, transform: `translate(-50%, -50%) scale(${arr.textSize ?? 1})`, pointerEvents: mode === 'draw' || mode === 'dot' ? 'none' : 'auto' }}>
-                              <div className={`relative flex items-center justify-center px-1 rounded transition-all ${isEditingThis && mode !== 'preview' ? 'ring-1 ring-orange-500 bg-white/50' : 'bg-transparent'}`} onPointerDown={(e) => {
-                                if (mode === 'preview') return;
-                                e.stopPropagation();
-                                if (arr.id !== selectedArrowId) {
-                                  setSelectedArrowId(arr.id);
-                                  setSelectedDotId(null);
-                                  setEditAction('move');
-                                } else if (editAction === 'move') {
-                                  startArrowDrag(e, arr.id, 'move_body');
-                                }
-                              }}>
-                                <input 
-                                  type="text" 
-                                  readOnly={mode === 'preview'} 
-                                  value={arr.label} 
-                                  onChange={(e) => setArrows(arrows.map(a => a.id === arr.id ? { ...a, label: e.target.value } : a))} 
-                                  onPointerDown={(e) => {
-                                    if (mode === 'preview') return;
-                                    e.stopPropagation();
-                                    if (arr.id !== selectedArrowId) {
-                                      setSelectedArrowId(arr.id);
-                                      setSelectedDotId(null);
-                                      setEditAction('move');
-                                    }
-                                  }} 
-                                  className="text-center font-bold outline-none bg-transparent text-xs pointer-events-auto" 
-                                  style={{ 
-                                    color: textColor, 
-                                    width: `${Math.max(arr.label.length, 2) + 1}ch`, 
-                                    minWidth: '20px', 
-                                    maxWidth: '200px'
-                                  }} 
-                                />
-                              </div>
-                            </div>
+                            <g key={`line-${arr.id}`}>
+                              {mode !== 'preview' && (
+                                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="transparent" strokeWidth="30" className="pointer-events-auto cursor-pointer" onPointerDown={(e) => {
+                                  if (mode === 'draw') return;
+                                  e.stopPropagation();
+                                  if (arr.id !== selectedArrowId) {
+                                    setSelectedArrowId(arr.id); setSelectedDotId(null);
+                                    setEditAction('move'); startArrowDrag(e, arr.id, 'move_body');
+                                  } else if (editAction === 'move') { startArrowDrag(e, arr.id, 'move_body');
+                                  } else if (editAction === 'rotate') { startArrowDrag(e, arr.id, 'rotate'); }
+                                }} />
+                              )}
+                              
+                              {!skipLine && (
+                                <>
+                                  <line x1={x1} y1={y1} x2={cutX1} y2={cutY1} stroke={color} strokeWidth={(isEditingThis && mode !== 'preview' ? 1.5 : 1) * (arr.size || 1)} />
+                                  <line x1={cutX2} y1={cutY2} x2={x2} y2={y2} stroke={color} strokeWidth={(isEditingThis && mode !== 'preview' ? 1.5 : 1) * (arr.size || 1)} />
+                                </>
+                              )}
+                              
+                              {renderTickHalf(x1, y1, perpX, perpY, ticks[0], 0, arr.id)}
+                              {renderTickHalf(x1, y1, -perpX, -perpY, ticks[1], 1, arr.id)}
+                              {renderTickHalf(x2, y2, perpX, perpY, ticks[2], 2, arr.id)}
+                              {renderTickHalf(x2, y2, -perpX, -perpY, ticks[3], 3, arr.id)}
+
+                              {heads[0] && <polygon points={`${x1},${y1} ${x1 + headLen * Math.cos(angle + 0.4)},${y1 + headLen * Math.sin(angle + 0.4)} ${x1 + headLen * Math.cos(angle - 0.4)},${y1 + headLen * Math.sin(angle - 0.4)}`} fill={color} />}
+                              {heads[1] && <polygon points={`${x2},${y2} ${x2 - headLen * Math.cos(angle + 0.4)},${y2 - headLen * Math.sin(angle + 0.4)} ${x2 - headLen * Math.cos(angle - 0.4)},${y2 - headLen * Math.sin(angle - 0.4)}`} fill={color} />}
+
+                              {isEditingThis && editAction === 'resize' && mode !== 'preview' && (
+                                <>
+                                  <circle cx={x1} cy={y1} r="8" fill="white" stroke="#ea580c" strokeWidth="2" className="pointer-events-auto cursor-crosshair" onPointerDown={(e) => { e.stopPropagation(); startArrowDrag(e, arr.id, 'move_start'); }} />
+                                  <circle cx={x2} cy={y2} r="8" fill="white" stroke="#ea580c" strokeWidth="2" className="pointer-events-auto cursor-crosshair" onPointerDown={(e) => { e.stopPropagation(); startArrowDrag(e, arr.id, 'move_end'); }} />
+                                </>
+                              )}
+                            </g>
                           );
                         })}
 
-                        {/* GOMMETTES */}
-                        {dots.map(dot => {
-                          const isSelected = dot.id === selectedDotId;
-                          const baseColor = dot.color || '#0284c7';
-                          const dSize = dot.size || 1;
+                        {dragState && dragState.type === 'draw' && dragState.isDirty && (
+                          <line x1={dragState.startX} y1={dragState.startY} x2={dragState.currentX} y2={dragState.currentY} stroke="#0284c7" strokeWidth="2" strokeDasharray="4" />
+                        )}
+                      </svg>
 
-                          return (
-                            <div 
-                              key={`dot-${dot.id}`}
-                              className="absolute z-30 flex items-center justify-center pointer-events-auto"
-                              style={{ 
-                                left: dot.x, 
-                                top: dot.y, 
-                                transform: `translate(-50%, -50%) scale(${dSize})`,
-                                cursor: mode === 'select' ? 'move' : 'default'
-                              }}
-                              onPointerDown={(e) => {
-                                if (mode === 'preview') return;
-                                if (e.target.tagName === 'INPUT') return;
-                                startDotDrag(e, dot.id);
-                              }}
-                            >
-                              <div style={{ backgroundColor: isSelected ? '#f59e0b' : baseColor, minWidth: '28px', padding: '0 6px' }} className="h-7 rounded-full flex items-center justify-center font-bold text-xs text-white shadow pointer-events-auto transition-all">
-                                <input 
-                                  type="text"
-                                  readOnly={mode === 'preview'}
-                                  value={dot.label}
-                                  onChange={(e) => setDots(dots.map(d => d.id === dot.id ? { ...d, label: e.target.value } : d))}
-                                  onPointerDown={(e) => {
-                                    if (mode === 'preview') return;
-                                    e.stopPropagation();
-                                    setSelectedDotId(dot.id);
-                                    setSelectedArrowId(null);
-                                  }}
-                                  className="text-center bg-transparent outline-none text-white text-xs font-bold pointer-events-auto"
-                                  style={{ width: `${Math.max(dot.label.length, 1.5)}ch` }}
-                                />
-                              </div>
+                      {arrows.map(arr => {
+                        const isSelected = arr.id === selectedArrowId;
+                        const isEditingThis = isSelected && mode === 'select';
+                        const midX = (arr.x1 + arr.x2) / 2;
+                        const midY = (arr.y1 + arr.y2) / 2;
+                        const textColor = arr.color || '#0284c7';
+
+                        return (
+                          <div key={`text-${arr.id}`} className="absolute z-20 flex items-center justify-center group" style={{ left: midX, top: midY, transform: `translate(-50%, -50%) scale(${arr.textSize ?? 1})`, pointerEvents: mode === 'draw' || mode === 'dot' ? 'none' : 'auto' }}>
+                            <div className={`relative flex items-center justify-center px-1 rounded transition-all ${isEditingThis && mode !== 'preview' ? 'ring-1 ring-orange-500' : 'bg-transparent'}`} onPointerDown={(e) => {
+                              if (mode === 'preview') return;
+                              e.stopPropagation();
+                              if (arr.id !== selectedArrowId) {
+                                setSelectedArrowId(arr.id); setSelectedDotId(null);
+                                setEditAction('move');
+                              } else if (editAction === 'move') { startArrowDrag(e, arr.id, 'move_body'); }
+                            }}>
+                              <EditableText 
+                                value={arr.label} 
+                                onChange={(newHtml) => setArrows(arrows.map(a => a.id === arr.id ? { ...a, label: newHtml } : a))} 
+                                onCommit={(newHtml) => {
+                                  const newArrows = arrows.map(a => a.id === arr.id ? { ...a, label: newHtml } : a);
+                                  setArrows(newArrows);
+                                  saveToHistory(newArrows, dots);
+                                }}
+                                isPreview={mode === 'preview'} 
+                                textColor={textColor}
+                                arrowId={arr.id}
+                                onPointerDown={(e) => {
+                                  if (mode === 'preview') return;
+                                  e.stopPropagation();
+                                  if (arr.id !== selectedArrowId) { setSelectedArrowId(arr.id); setSelectedDotId(null); setEditAction('move'); }
+                                }} 
+                              />
                             </div>
-                          );
-                        })}
+                          </div>
+                        );
+                      })}
 
-                      </div>
+                      {dots.map(dot => {
+                        const isSelected = dot.id === selectedDotId;
+                        const baseColor = dot.color || '#0284c7';
+                        const dSize = dot.size || 1;
+
+                        return (
+                          <div 
+                            key={`dot-${dot.id}`} className="absolute z-30 flex items-center justify-center pointer-events-auto"
+                            style={{ left: dot.x, top: dot.y, transform: `translate(-50%, -50%) scale(${dSize})`, cursor: mode === 'select' ? 'move' : 'default' }}
+                            onPointerDown={(e) => {
+                              if (mode === 'preview' || e.target.tagName === 'INPUT') return;
+                              startDotDrag(e, dot.id);
+                            }}
+                          >
+                            <div style={{ backgroundColor: isSelected ? '#f59e0b' : baseColor, minWidth: '28px', padding: '0 6px' }} className="h-7 rounded-full flex items-center justify-center font-bold text-xs text-white shadow pointer-events-auto transition-all">
+                              <input 
+                                type="text" readOnly={mode === 'preview'} value={dot.label}
+                                onChange={(e) => setDots(dots.map(d => d.id === dot.id ? { ...d, label: e.target.value } : d))}
+                                onBlur={(e) => saveToHistory(arrows, dots)}
+                                onPointerDown={(e) => {
+                                  if (mode === 'preview') return;
+                                  e.stopPropagation();
+                                  setSelectedDotId(dot.id); setSelectedArrowId(null);
+                                }}
+                                className="text-center bg-transparent outline-none text-white text-xs font-bold pointer-events-auto"
+                                style={{ width: `${Math.max(dot.label.length, 1.5)}ch` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
 
                     </div>
                   </div>
